@@ -69,7 +69,7 @@ query GetExtensions($first: Int, $after: Cursor) {
 
 GET_SOURCES = gql("""
 query GetSources($first: Int, $after: Cursor) {
-  sources(filter: { lang: { in: ["en", "all"] } }, first: $first, after: $after) {
+  sources(first: $first, after: $after) {
     nodes {
       id
       name
