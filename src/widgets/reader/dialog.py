@@ -1,6 +1,5 @@
 from gi.repository import Adw, GObject, Gtk
 
-# Position in each combo row's model
 ORIENTATIONS = [Gtk.Orientation.VERTICAL, Gtk.Orientation.HORIZONTAL]
 DIRECTIONS = [Gtk.TextDirection.LTR, Gtk.TextDirection.RTL]
 

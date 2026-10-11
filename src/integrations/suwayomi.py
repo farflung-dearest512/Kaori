@@ -1,21 +1,24 @@
 import gi
-from gi.repository import GObject, GLib, Gdk, Gio
+gi.require_version('Gdk', '4.0')
 gi.require_version('Gly', '2')
 gi.require_version('GlyGtk4', '2')
-from gi.repository import Gly, GlyGtk4
+from gi.repository import Gdk, Gio, GLib, GObject, Gly, GlyGtk4
 
 import asyncio
-import httpx
+import enum
 import json
-from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
+from urllib.parse import urljoin
+
+import httpx
+from babel import Locale
 from diskcache import Cache
 from gql import Client
 from gql.transport.aiohttp import AIOHTTPTransport
+
 from . import models
 from .queries import *
-
-from urllib.parse import urljoin
 
 MODEL_CLASSES = {
     'Manga': models.Manga,
@@ -24,11 +27,13 @@ MODEL_CLASSES = {
     'Source': models.Source,
 }
 
-class SourceMangaType:
-    SEARCH = "SEARCH"
-    POPULAR = "POPULAR"
-    LATEST = "LATEST"
-
+FETCH_CONNECTIONS = 8
+DECODE_WORKERS = max(2, min(4, os.cpu_count() or 2))
+IMAGE_TIMEOUT = 10
+IMAGE_RETRIES = 1
+CACHE_SIZE_LIMIT = 500 * 1024 * 1024
+GRAPHQL_TIMEOUT = 20
+LOCAL_SOURCE_ID = "0"
 
 READING_MODES = {
     0: ("single", "vertical"),
@@ -40,8 +45,30 @@ READING_MODES = {
 
 GLOBAL_MODE_VALUES = {"single": 0, "double": 1}
 
+
+class SourceMangaType(enum.StrEnum):
+    SEARCH = "SEARCH"
+    POPULAR = "POPULAR"
+    LATEST = "LATEST"
+
+
+def readingModeValue(mode: str, orientation: str) -> int:
+    if mode in GLOBAL_MODE_VALUES:
+        return GLOBAL_MODE_VALUES[mode]
+    return 3 if orientation == "horizontal" else 4
+
+
+def makeClient(url: str) -> Client:
+    transport = AIOHTTPTransport(timeout=GRAPHQL_TIMEOUT, url=url.rstrip('/') + '/api/graphql')
+    return Client(transport=transport, fetch_schema_from_transport=False)
+
+
 class Suwayomi(GObject.Object):
     __gtype_name__ = 'KaghezIntegrationSuwayomi'
+
+    MODE_KEY = "webUI_readingMode"
+    DIRECTION_KEY = "webUI_readingDirection"
+    LANGUAGES_KEY = "webUI_browseLanguages"
 
     url = GObject.Property(type=str, default="http://localhost:4567")
     downloader_state = GObject.Property(type=str, default="STOPPED")
@@ -51,50 +78,50 @@ class Suwayomi(GObject.Object):
     def __init__(self):
         super().__init__()
         self.loaded_models = {}
-        transport = AIOHTTPTransport(timeout=20, url=self.get_property('url').rstrip('/') + '/api/graphql')
-        self.client = Client(transport=transport, fetch_schema_from_transport=False)
+        self.pending = {}
         self.session = None
         self.connect_lock = asyncio.Lock()
-        self.http = httpx.AsyncClient()
+        self.client = makeClient(self.url)
 
-        self.MODE_KEY = "webUI_readingMode"
-        self.DIRECTION_KEY = "webUI_readingDirection"
-
-        self.image_semaphore = asyncio.Semaphore(5)
-        self.decode_semaphore = asyncio.Semaphore(2)
-
+        self.http = httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(
+                retries=IMAGE_RETRIES,
+                limits=httpx.Limits(max_connections=FETCH_CONNECTIONS),
+            ),
+            timeout=httpx.Timeout(IMAGE_TIMEOUT, pool=None),
+            follow_redirects=True,
+        )
+        self.decode_slots = asyncio.Semaphore(DECODE_WORKERS)
         self.cache = Cache(
             str(Path(GLib.get_user_cache_dir()) / "kaghez" / "images"),
-            size_limit=500 * 1024 * 1024,
+            size_limit=CACHE_SIZE_LIMIT,
             eviction_policy="least-recently-used",
         )
-        self.pending = {}
-        self.cache_executor = ThreadPoolExecutor(max_workers=1)
 
         self.download_queue = Gio.ListStore.new(item_type=models.Download)
         self.library = Gio.ListStore.new(item_type=models.Manga)
         self.sources = Gio.ListStore.new(item_type=models.Source)
         self.extensions = Gio.ListStore.new(item_type=models.Extension)
 
+        self.all_sources = []
+        self.languages = ["en", "all"]
+
     def reconnect(self, url: str):
         self.session = None
-        self.set_property('url', url)
-        transport = AIOHTTPTransport(timeout=20, url=url.rstrip('/') + '/api/graphql')
-        self.client = Client(transport=transport, fetch_schema_from_transport=False)
+        self.url = url
+        self.client = makeClient(url)
 
     async def close(self):
-        await self.http.aclose()
-        self.cache_executor.shutdown(wait=True)
-        self.cache.close()
         if self.session is not None:
             await self.client.close_async()
             self.session = None
+        await self.http.aclose()
+        await asyncio.to_thread(self.cache.close)
 
     async def getSession(self):
-        """Lazily connect once, then reuse the same session for every query."""
         if self.session is None:
             async with self.connect_lock:
-                if self.session is None:  # re-check after acquiring the lock
+                if self.session is None:
                     self.session = await self.client.connect_async()
         return self.session
 
@@ -103,9 +130,8 @@ class Suwayomi(GObject.Object):
             try:
                 session = await self.getSession()
                 return await session.execute(gql_query, variable_values=variable_values) or {}
-            except (asyncio.TimeoutError, TimeoutError) as e:
+            except TimeoutError:
                 if attempt < retries:
-                    await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 print(f"[query] timed out after {attempt + 1} attempt(s)")
                 if raise_errors:
@@ -125,46 +151,32 @@ class Suwayomi(GObject.Object):
             self.pending[key] = task
         return await asyncio.shield(self.pending[key])
 
+    async def loadBytes(self, url: str) -> bytes | None:
+        cached = await asyncio.to_thread(self.cache.get, url)
+        if cached is not None:
+            return cached
 
-    async def getPaintableBytes(self, url: str, retries: int = 1) -> bytes | None:
-        for attempt in range(retries + 1):
-            try:
-                response = await self.http.get(url, timeout=10)
-            except httpx.HTTPError as e:
-                if attempt < retries:
-                    await asyncio.sleep(0.3 * (attempt + 1))
-                    continue
-                print(f"[getPaintableBytes] request failed for {url}: {type(e).__name__}: {e}")
-                return None
-            if response.status_code != 200:
-                print(f"[getPaintableBytes] status {response.status_code} for {url}")
-                return None
-            return response.content
-        return None
+        try:
+            response = await self.http.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            print(f"[loadBytes] request failed for {url}: {type(e).__name__}: {e}")
+            return None
+
+        await asyncio.to_thread(self.cache.set, url, response.content)
+        return response.content
 
     async def getPaintable(self, url: str) -> Gdk.Paintable | None:
         raw_bytes = await self.shared(('bytes', url), lambda: self.loadBytes(url))
         if not raw_bytes:
             return None
-
-        async with self.decode_semaphore:
-            try:
+        try:
+            async with self.decode_slots:
                 return await asyncio.to_thread(self.makeTexture, raw_bytes)
-            except GLib.Error as e:
-                print(f"[getPaintable] decode failed for {url}: {e.message}")
-                self.cache_executor.submit(self.cache.delete, url)
-                return None
-
-    async def loadBytes(self, url: str) -> bytes | None:
-        raw_bytes = await asyncio.to_thread(self.cache.get, url)
-        if raw_bytes is None:
-            async with self.image_semaphore:
-                raw_bytes = await self.getPaintableBytes(url)
-            if not raw_bytes:
-                print(f"[getPaintable] no bytes for {url}")
-                return None
-            self.cache_executor.submit(self.cache.set, url, raw_bytes)
-        return raw_bytes
+        except GLib.Error as e:
+            print(f"[getPaintable] decode failed for {url}: {e.message}")
+            await asyncio.to_thread(self.cache.delete, url)
+            return None
 
     def makeTexture(self, raw_bytes: bytes) -> Gdk.Texture:
         gbytes = GLib.Bytes.new(raw_bytes)
@@ -174,7 +186,6 @@ class Suwayomi(GObject.Object):
             loader = Gly.Loader.new_for_bytes(gbytes)
             frame = loader.load().next_frame()
             return GlyGtk4.frame_get_texture(frame)
-
 
     def getModel(self, model_id: int | str, item_type: str) -> GObject.Object | None:
         return self.loaded_models.get((item_type, model_id))
@@ -192,23 +203,27 @@ class Suwayomi(GObject.Object):
             model = MODEL_CLASSES[item_type]()
             self.loaded_models[key] = model
 
-        if item_type == 'Manga':
-            self.fillManga(model, item)
-        elif item_type == 'Chapter':
-            self.fillChapter(model, item)
-        elif item_type == 'Extension':
-            self.fillExtension(model, item)
-        elif item_type == 'Source':
-            self.fillSource(model, item)
+        fill = {
+            'Manga': self.fillManga,
+            'Chapter': self.fillChapter,
+            'Extension': self.fillExtension,
+            'Source': self.fillSource,
+        }[item_type]
+        fill(model, item)
         return model
+
+    def makeModels(self, nodes: list, item_type: str) -> list:
+        return [model for model in (self.makeModel(node, item_type) for node in nodes) if model is not None]
 
     def makeChapterStore(self, chapter_models: list) -> Gio.ListStore:
         store = Gio.ListStore.new(item_type=models.Chapter)
         store.splice(0, 0, chapter_models)
         return store
 
+    def absoluteUrl(self, path: str | None) -> str:
+        return urljoin(self.url, path) if path else ""
+
     def fillManga(self, model, item: dict):
-        thumbnail_url = item.get('thumbnailUrl')
         model.update_data(
             id=item.get('id'),
             title=item.get('title'),
@@ -223,7 +238,7 @@ class Suwayomi(GObject.Object):
             first_unread_chapter=self.makeModel(item.get('firstUnreadChapter'), 'Chapter'),
             last_read_chapter=self.makeModel(item.get('lastReadChapter'), 'Chapter'),
             real_url=item.get('realUrl'),
-            thumbnail_url=urljoin(self.url, thumbnail_url) if thumbnail_url else "",
+            thumbnail_url=self.absoluteUrl(item.get('thumbnailUrl')),
         )
 
         chapters = item.get('chapters')
@@ -232,8 +247,7 @@ class Suwayomi(GObject.Object):
                 model.set_property('total_chapters', chapters['totalCount'])
             nodes = chapters.get('nodes')
             if nodes is not None:
-                chapter_models = [self.makeModel(node, 'Chapter') for node in nodes]
-                model.set_property('chapters', self.makeChapterStore([c for c in chapter_models if c is not None]))
+                model.set_property('chapters', self.makeChapterStore(self.makeModels(nodes, 'Chapter')))
         if model.chapters is None:
             model.set_property('chapters', self.makeChapterStore([]))
 
@@ -244,24 +258,21 @@ class Suwayomi(GObject.Object):
     def fillExtension(self, model, item: dict):
         values = {name: item[key] for key, name in EXTENSION_FIELDS.items() if key in item}
         if 'iconUrl' in item:
-            icon_url = item.get('iconUrl')
-            values['icon_url'] = urljoin(self.url, icon_url) if icon_url else ""
+            values['icon_url'] = self.absoluteUrl(item.get('iconUrl'))
         model.update_data(pkg_name=item.get('pkgName'), **values)
 
     def fillSource(self, model, item: dict):
-        icon_url = item.get('iconUrl')
         extension = item.get('extension') or {}
         model.update_data(
             id=item.get('id'),
             name=item.get('name'),
             lang=item.get('lang', ''),
-            icon_url=urljoin(self.url, icon_url) if icon_url else "",
+            icon_url=self.absoluteUrl(item.get('iconUrl')),
             is_configurable=item.get('isConfigurable', False),
             is_nsfw=item.get('isNsfw', False),
             extension_pkg_name=extension.get('pkgName', ''),
             extension_name=extension.get('name', ''),
         )
-
 
     async def getManga(self, manga_id: int) -> models.Manga | None:
         model = self.getModel(manga_id, 'Manga')
@@ -277,7 +288,7 @@ class Suwayomi(GObject.Object):
         data = result.get('fetchMangaAndChapters', {})
         node = data.get('manga')
         if node is None:
-            return self.getModel(manga_id, 'Manga')  # fall back to whatever is cached
+            return self.getModel(manga_id, 'Manga')
         chapters_list = data.get('chapters', [])
         node = {**node, 'chapters': {'nodes': chapters_list, 'totalCount': len(chapters_list)}}
         return self.makeModel(node, 'Manga')
@@ -291,9 +302,7 @@ class Suwayomi(GObject.Object):
         variables = {"mangaId": manga_id, "first": first, "after": after}
         result = await self.query(GET_CHAPTERS_MANGA, variable_values=variables)
         connection = result.get('chapters', {})
-        nodes = connection.get('nodes', [])
-        chapter_models = [self.makeModel(node, 'Chapter') for node in nodes]
-        chapter_models = [c for c in chapter_models if c is not None]
+        chapter_models = self.makeModels(connection.get('nodes', []), 'Chapter')
 
         model = self.getModel(manga_id, 'Manga')
         if model is not None:
@@ -302,18 +311,14 @@ class Suwayomi(GObject.Object):
 
         return chapter_models
 
-
     async def refreshLibrary(self):
         await self.shared(('library',), self.loadLibrary)
 
     async def loadLibrary(self):
         result = await self.query(GET_LIBRARY)
         if 'mangas' not in result:
-            return  # the request failed, keep what we have
-        nodes = result['mangas'].get('nodes') or []
-        manga_models = [self.makeModel(node, 'Manga') for node in nodes]
-        manga_models = [m for m in manga_models if m is not None]
-
+            return
+        manga_models = self.makeModels(result['mangas'].get('nodes') or [], 'Manga')
         if list(self.library) != manga_models:
             self.library.splice(0, self.library.get_n_items(), manga_models)
 
@@ -331,10 +336,8 @@ class Suwayomi(GObject.Object):
         result = await self.query(FETCH_EXTENSIONS, retries=2)
         data = result.get('fetchExtensions')
         if data is None:
-            return  # request failed, keep what we have
-        nodes = data.get('extensions') or []
-        extension_models = [self.makeModel(node, 'Extension') for node in nodes]
-        extension_models = [m for m in extension_models if m is not None]
+            return
+        extension_models = self.makeModels(data.get('extensions') or [], 'Extension')
         if list(self.extensions) != extension_models:
             self.extensions.splice(0, self.extensions.get_n_items(), extension_models)
 
@@ -342,14 +345,34 @@ class Suwayomi(GObject.Object):
         await self.shared(('sources',), self.loadSources)
 
     async def loadSources(self):
-        result = await self.query(GET_SOURCES)
+        async with asyncio.TaskGroup() as group:
+            sources_task = group.create_task(self.query(GET_SOURCES))
+            group.create_task(self.getBrowseLanguages())
+        result = sources_task.result()
         if 'sources' not in result:
             return
-        nodes = result['sources'].get('nodes') or []
-        source_models = [self.makeModel(node, 'Source') for node in nodes]
-        source_models = [m for m in source_models if m is not None]
-        if list(self.sources) != source_models:
-            self.sources.splice(0, self.sources.get_n_items(), source_models)
+        self.all_sources = self.makeModels(result['sources'].get('nodes') or [], 'Source')
+        self.applyLanguages()
+
+    def applyLanguages(self):
+        enabled = [
+            source for source in self.all_sources
+            if source.lang in self.languages or source.id == LOCAL_SOURCE_ID
+        ]
+        if list(self.sources) != enabled:
+            self.sources.splice(0, self.sources.get_n_items(), enabled)
+
+    async def getBrowseLanguages(self) -> list:
+        values = await self.getGlobalMetaValues()
+        languages = self.readMeta(values, self.LANGUAGES_KEY)
+        if isinstance(languages, list):
+            self.languages = languages
+        return self.languages
+
+    async def setBrowseLanguages(self, languages: list):
+        self.languages = languages
+        self.applyLanguages()
+        await self.setGlobalMeta(self.LANGUAGES_KEY, languages)
 
     async def getSourceManga(
         self,
@@ -361,15 +384,14 @@ class Suwayomi(GObject.Object):
     ) -> list:
         variables = {
             "source": source_id,
-            "type": fetch_type,
+            "type": str(fetch_type),
             "page": page,
             "query": query,
             "filters": filters or None,
         }
         result = await self.query(GET_SOURCE_MANGA, variable_values=variables, raise_errors=True)
         nodes = result.get('fetchSourceManga', {}).get('mangas', [])
-        manga_models = [self.makeModel(node, 'Manga') for node in nodes]
-        return [m for m in manga_models if m is not None]
+        return self.makeModels(nodes, 'Manga')
 
     def makeFilter(self, node: dict) -> dict:
         default = None
@@ -389,7 +411,6 @@ class Suwayomi(GObject.Object):
         result = await self.query(GET_SOURCE_FILTERS, variable_values={"id": source_id})
         nodes = (result.get('source') or {}).get('filters') or []
         return [self.makeFilter(node) for node in nodes]
-
 
     async def changeExtension(self, pkg_name: str, **patch):
         model = self.getModel(pkg_name, 'Extension')
@@ -412,7 +433,6 @@ class Suwayomi(GObject.Object):
 
     async def uninstallExtension(self, pkg_name: str):
         await self.changeExtension(pkg_name, uninstall=True)
-
 
     def makePageModel(self, chapter_id: int, index: int, url: str) -> models.Page:
         return models.Page(
@@ -450,6 +470,13 @@ class Suwayomi(GObject.Object):
         is_bookmarked: bool | None = None,
         last_page_read: int | None = None,
     ):
+        changes = {
+            "is_read": is_read,
+            "is_bookmarked": is_bookmarked,
+            "last_page_read": last_page_read,
+        }
+        changes = {name: value for name, value in changes.items() if value is not None}
+
         variables = {"id": chapter_id}
         if is_read is not None:
             variables["isRead"] = is_read
@@ -460,20 +487,14 @@ class Suwayomi(GObject.Object):
 
         model = self.getModel(chapter_id, 'Chapter')
         if model:
-            model.update_data(**{
-                name: value for name, value in (
-                    ("is_read", is_read),
-                    ("is_bookmarked", is_bookmarked),
-                    ("last_page_read", last_page_read),
-                ) if value is not None
-            })
+            model.update_data(**changes)
 
         result = await self.query(UPDATE_CHAPTER, variable_values=variables)
         node = result.get('updateChapter', {}).get('chapter')
         if node is None:
             return
         manga_node = node.pop('manga', None)
-        self.makeModel(node, 'Chapter')  # server truth, applied on top
+        self.makeModel(node, 'Chapter')
         if manga_node:
             manga_model = self.getModel(manga_node.get('id'), 'Manga')
             if manga_model:
@@ -525,7 +546,6 @@ class Suwayomi(GObject.Object):
     async def removeFromLibrary(self, manga_id: int):
         await self.setMangaLibrary(manga_id, False)
 
-
     def makeDownloadModel(self, item: dict) -> models.Download | None:
         chapter = item.get('chapter') or {}
         manga = item.get('manga') or {}
@@ -555,9 +575,7 @@ class Suwayomi(GObject.Object):
             return
         self.downloader_state = status.get('state') or self.downloader_state
 
-        items = status.get('queue') or []
-        new_models = [self.makeDownloadModel(item) for item in items]
-        new_models = [m for m in new_models if m is not None]
+        new_models = [m for m in map(self.makeDownloadModel, status.get('queue') or []) if m is not None]
 
         current_ids = [m.chapter_id for m in self.download_queue]
         new_ids = [m.chapter_id for m in new_models]
@@ -586,15 +604,17 @@ class Suwayomi(GObject.Object):
     async def stopDownloader(self):
         await self.downloadCommand(STOP_DOWNLOADER)
 
+    @staticmethod
+    def metaValues(nodes: list | None) -> dict:
+        return {meta['key']: meta['value'] for meta in nodes or []}
 
-    async def getReaderSettings(self, manga_id: int) -> dict:
-        result = await self.query(GET_READER_META, variable_values={"id": manga_id})
-        global_meta = (result.get('metas') or {}).get('nodes') or []
-        manga_meta = (result.get('manga') or {}).get('meta') or []
+    def readMeta(self, values: dict, key: str):
+        try:
+            return json.loads(values[key])
+        except (KeyError, json.JSONDecodeError):
+            return None
 
-        values = {m['key']: m['value'] for m in global_meta}
-        values.update({m['key']: m['value'] for m in manga_meta})
-
+    def parseReaderSettings(self, values: dict) -> dict:
         settings = {}
         mode = self.readMeta(values, self.MODE_KEY)
         if mode in READING_MODES:
@@ -604,27 +624,22 @@ class Suwayomi(GObject.Object):
             settings["direction"] = "rtl" if direction == 1 else "ltr"
         return settings
 
-    def readMeta(self, values: dict, key: str):
-        try:
-            return json.loads(values[key])
-        except (KeyError, json.JSONDecodeError):
-            return None
+    async def getGlobalMetaValues(self) -> dict:
+        result = await self.query(GET_GLOBAL_READER_META)
+        return self.metaValues((result.get('metas') or {}).get('nodes'))
+
+    async def getReaderSettings(self, manga_id: int) -> dict:
+        result = await self.query(GET_READER_META, variable_values={"id": manga_id})
+        values = self.metaValues((result.get('metas') or {}).get('nodes'))
+        values.update(self.metaValues((result.get('manga') or {}).get('meta')))
+        return self.parseReaderSettings(values)
 
     async def setReaderSettings(self, manga_id: int, settings: dict):
-        if settings["mode"] == "single":
-            mode = 0
-        elif settings["mode"] == "double":
-            mode = 1
-        elif settings["orientation"] == "horizontal":
-            mode = 3
-        else:
-            mode = 4
+        mode = readingModeValue(settings["mode"], settings["orientation"])
         direction = 1 if settings["direction"] == "rtl" else 0
-
-        await asyncio.gather(
-            self.setMeta(manga_id, self.MODE_KEY, mode),
-            self.setMeta(manga_id, self.DIRECTION_KEY, direction),
-        )
+        async with asyncio.TaskGroup() as group:
+            group.create_task(self.setMeta(manga_id, self.MODE_KEY, mode))
+            group.create_task(self.setMeta(manga_id, self.DIRECTION_KEY, direction))
 
     async def setMeta(self, manga_id: int, key: str, value):
         await self.query(SET_MANGA_META, variable_values={
@@ -634,24 +649,10 @@ class Suwayomi(GObject.Object):
         })
 
     async def getGlobalReaderSettings(self) -> dict:
-        result = await self.query(GET_GLOBAL_READER_META)
-        nodes = (result.get('metas') or {}).get('nodes') or []
-        values = {m['key']: m['value'] for m in nodes}
-
-        settings = {}
-        mode = self.readMeta(values, self.MODE_KEY)
-        if mode in READING_MODES:
-            settings["mode"], settings["orientation"] = READING_MODES[mode]
-        direction = self.readMeta(values, self.DIRECTION_KEY)
-        if direction in (0, 1):
-            settings["direction"] = "rtl" if direction == 1 else "ltr"
-        return settings
+        return self.parseReaderSettings(await self.getGlobalMetaValues())
 
     async def setGlobalReadingMode(self, mode: str, orientation: str):
-        value = GLOBAL_MODE_VALUES.get(mode)
-        if value is None:  # webtoon
-            value = 3 if orientation == "horizontal" else 4
-        await self.setGlobalMeta(self.MODE_KEY, value)
+        await self.setGlobalMeta(self.MODE_KEY, readingModeValue(mode, orientation))
 
     async def setGlobalReadingDirection(self, direction: str):
         await self.setGlobalMeta(self.DIRECTION_KEY, 1 if direction == "rtl" else 0)
@@ -681,3 +682,13 @@ class Suwayomi(GObject.Object):
 
     async def setExtensionStores(self, urls: list):
         await self.setServerSettings(extensionRepos=urls)
+
+    def languageTitle(self, lang: str) -> str:
+        if lang == "all":
+            return "All languages"
+        if not lang or lang == "localsourcelang":
+            return "Other"
+        try:
+            return Locale.parse(lang, sep="-").get_display_name("en")
+        except Exception:
+            return lang.upper()

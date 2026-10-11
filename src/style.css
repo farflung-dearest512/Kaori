@@ -1,12 +1,18 @@
 .manga-grid {
   background: none;
   color: inherit;
-  padding-left: 3px;
-  padding-right: 3px;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
-.manga-grid > child {
-  margin: 3px;
+.manga-grid > child,
+.manga-row > row {
+  margin: 0;
+  padding: 0;
+}
+
+.manga-row > row {
+  border-radius: 9px;
 }
 
 .inherit-color {
@@ -36,12 +42,10 @@
   padding-bottom: 0px;
 }
 
-.manga-row > row {
-  border-radius: 9px;
-}
 
 .reader-header {
-  background-image: linear-gradient(to bottom, rgba(0,0,0,0.15), transparent);
+  background: linear-gradient(to bottom, rgba(0,0,0,0.15), transparent);
+  box-shadow: none;
 }
 
 .reader-osd {

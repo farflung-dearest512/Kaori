@@ -12,6 +12,7 @@ template $KaghezMangaRow : Gtk.Box {
     label: bind template.title;
     xalign: 0;
     ellipsize: end;
+    margin-start: 6;
   }
   Gtk.Overlay {
     styles [
@@ -50,7 +51,7 @@ template $KaghezMangaRow : Gtk.Box {
         single-click-activate: true;
         hscroll-policy: natural;
         vscroll-policy: minimum;
-        height-request: 340;
+        height-request: 325;
       };
     };
   }

@@ -8,25 +8,26 @@ template $KaghezMangaCard : Gtk.Box {
   margin-end: 6;
   margin-top: 6;
   margin-bottom: 6;
+  tooltip-text: bind template.model as <$KaghezManga> .title;
+  Gtk.AspectFrame {
+    ratio: 0.667;
+    obey-child: false;
 
-
-  Gtk.Picture poster {
-    styles [
-      "rounded"
-    ]
-    paintable: bind template.model as <$KaghezManga> .paintable;
-    content-fit: cover;
-    vexpand: true;
+    child: Gtk.Picture poster {
+      styles [
+        "rounded"
+      ]
+      paintable: bind template.model as <$KaghezManga> .paintable;
+      content-fit: cover;
+    };
   }
 
-
-  Gtk.Label title {
+  Gtk.Inscription title {
     styles [
       "heading"
     ]
-    label: bind template.model as <$KaghezManga> .title;
+    text: bind template.model as <$KaghezManga> .title;
     xalign: 0.0;
-    ellipsize: end;
-    tooltip-text: bind template.model as <$KaghezManga> .title;
+    text-overflow: ellipsize_end;
   }
 }

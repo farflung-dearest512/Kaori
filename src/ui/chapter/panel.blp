@@ -26,7 +26,8 @@ template $KaghezChapterPanel : Adw.NavigationPage {
           hscrollbar-policy: never;
           child: Gtk.ListView chapter_list {
             styles [
-            "inherit-color"
+            "inherit-color",
+            "navigation-sidebar"
             ]
             single-click-activate: true;
             width-request: 300;

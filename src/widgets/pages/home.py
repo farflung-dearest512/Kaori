@@ -1,10 +1,17 @@
 import asyncio
+import random
 from gi.repository import Gtk, Adw, Gio, GObject
 
 from ..manga import MangaOverview
 from ..containers import MangaRow
 
 from ...integrations import SourceMangaType
+
+MAX_ROWS = 5
+CANDIDATES = 15
+MAX_CONCURRENT = 3
+LOCAL_SOURCE_ID = "0"
+
 
 @Gtk.Template(resource_path='/com/rini/kaghez/pages/home.ui')
 class HomePage(Adw.NavigationPage):
@@ -64,33 +71,44 @@ class HomePage(Adw.NavigationPage):
             "carousel" if self.carousel_children else "empty"
         )
 
+    def pick_sources(self) -> list:
+        eligible = [s for s in self.suwayomi.sources if str(s.id) != LOCAL_SOURCE_ID]
+        by_extension = {}
+        for source in eligible:
+            by_extension.setdefault(source.extension_pkg_name, []).append(source)
+        picked = [random.choice(group) for group in by_extension.values()]
+
+        random.shuffle(picked)
+        return picked[:CANDIDATES]
+
     async def load_sources(self):
         await self.suwayomi.refreshSources()
-        sources = list(self.suwayomi.sources)[:5]
+        sources = self.pick_sources()
 
-        tasks = []
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+        rows_added = 0
 
-        for source in sources:
-            row = MangaRow(source.name)
-            row.set_visible(False)
-            self.main_box.append(row)
-            tasks.append(self.get_popular(source, row))
+        async def run(source):
+            nonlocal rows_added
+            if rows_added >= MAX_ROWS:
+                return
+            async with semaphore:
+                if rows_added >= MAX_ROWS:
+                    return
+                try:
+                    mangas = await self.suwayomi.getSourceManga(
+                        source.id, fetch_type=SourceMangaType.POPULAR
+                    )
+                except Exception as e:
+                    print(f"source {source.name!r} ({source.id}) failed: {e!r}")
+                    return
+                if not mangas or rows_added >= MAX_ROWS:
+                    return
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+                row = MangaRow(source.name)
+                row.set_items(mangas[:8])
+                self.main_box.append(row)
+                rows_added += 1
+                self.shown_rows += 1
 
-    async def get_popular(self, source, row):
-        try:
-            mangas = await self.suwayomi.getSourceManga(
-                source.id, fetch_type=SourceMangaType.POPULAR
-            )
-        except Exception as e:
-            print(f"source {source.name!r} ({source.id}) failed: {e!r}")
-            return
-
-        if mangas:
-            mangas = mangas[:8]
-            row.set_items(mangas)
-            row.set_visible(True)
-            self.shown_rows += 1
-        else:
-            self.main_box.remove(row)
+        await asyncio.gather(*(run(s) for s in sources), return_exceptions=True)

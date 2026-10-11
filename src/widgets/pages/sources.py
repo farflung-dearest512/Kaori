@@ -66,14 +66,8 @@ class SourcesPage(Adw.NavigationPage):
 
     @Gtk.Template.Callback()
     def on_header_bind(self, factory, header):
-        lang = header.get_item().lang
-        if lang == "all":
-            title = "All languages"
-        elif lang:
-            title = lang.upper()
-        else:
-            title = "Other"
-        header.get_child().set_label(title)
+        header.get_child().set_label(self.suwayomi.languageTitle(header.get_item().lang))
+
 
     async def load_icon(self, item, card):
         paintable = await self.suwayomi.getPaintable(item.icon_url)
@@ -84,3 +78,4 @@ class SourcesPage(Adw.NavigationPage):
     def on_activate(self, listview, position):
         item = listview.get_model().get_item(position)
         listview.activate_action("app.show_source", GLib.Variant("s", item.id))
+

@@ -16,7 +16,12 @@ template $KaghezBrowsePage : Adw.NavigationPage {
           stack: browse_stack;
           policy: wide;
         };
-
+        [start]
+        Gtk.Button {
+          icon-name: "translate-symbolic";
+          tooltip-text: "Languages";
+          clicked => $on_languages_clicked();
+        }
         [end]
         Gtk.ToggleButton {
           icon-name: "system-search-symbolic";
@@ -63,7 +68,7 @@ template $KaghezBrowsePage : Adw.NavigationPage {
         Adw.ViewStackPage {
           name: "sources";
           title: "Sources";
-          icon-name: "network-server-symbolic";
+          icon-name: "chain-link-symbolic";
           child: Adw.NavigationView source_nav_view {
             $KaghezSourcesPage sources_page {}
           };

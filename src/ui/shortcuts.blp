@@ -39,5 +39,55 @@ Adw.ShortcutsDialog shortcuts_dialog {
       accelerator: "<Control>S";
     }
 
+    Adw.ShortcutsItem {
+      title: _("Scroll Up (Webtoon)");
+      accelerator: "Up";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Scroll Down (Webtoon)");
+      accelerator: "Down";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Zoom In");
+      accelerator: "<Control>plus";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Zoom Out");
+      accelerator: "<Control>minus";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Page Up (Webtoon)");
+      accelerator: "Page_Up";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Page Down (Webtoon)");
+      accelerator: "Page_Down";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Snap zoom to 100%");
+      subtitle: _("Double click to snap to 100%");
+      accelerator: "N/A"; //Doing this gets rid of the 'No Shortcut' label
+    }
+  }
+  Adw.ShortcutsSection {
+    title: _("Reader Gestures");
+
+    Adw.ShortcutsItem {
+      title: _("Zoom");
+      subtitle: _("Pinch with two fingers");
+      accelerator: "N/A";
+    }
+
+    Adw.ShortcutsItem {
+      title: _("Pan");
+      subtitle: _("Scroll with two fingers on a touchpad");
+      accelerator: "N/A";
+    }
   }
 }

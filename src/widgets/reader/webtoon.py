@@ -28,10 +28,10 @@ class WebtoonReader(ReaderBase):
         self.current_position = 0
 
         self.store = Gio.ListStore(item_type=models.Page)
-        self.chapters = []  # loaded chapter models, in strip order
-        self.loading = set()  # which ends of the strip are being extended: "before", "after"
+        self.chapters = []
+        self.loading = set()
 
-        self.scroll_direction = 0  # -1, 0 or 1 while an arrow key is held
+        self.scroll_direction = 0
         self.tick_id = 0
         self.last_frame_time = 0
 
@@ -158,7 +158,7 @@ class WebtoonReader(ReaderBase):
         page = self.store.get_item(index)
         self.maybe_prefetch(page)
 
-        if page.index < 0:  # sitting on a banner page, between chapters
+        if page.index < 0:
             return
 
         if page.chapter_id != self.chapter_model.id:

@@ -76,8 +76,6 @@ class SetupWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def begin_connect(self, mode: str, url: str):
-        # Nothing is shown while we try to connect; no window means no
-        # chance of the rest of the app touching the API prematurely.
         self.set_visible(False)
         asyncio.create_task(self.try_connect(mode, url))
 

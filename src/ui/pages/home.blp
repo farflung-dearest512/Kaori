@@ -47,24 +47,22 @@ template $KaghezHomePage : Adw.NavigationPage {
 
               Gtk.StackPage {
                 name: "carousel";
-                child: Gtk.Box {
-                  orientation: vertical;
-                  spacing: 6;
-
-                  Adw.Clamp {
+                child: Gtk.Overlay {
+                  child: Adw.Clamp {
                     orientation: vertical;
-                    maximum-size: 350;
+                    maximum-size: 290;
                     child: Adw.Carousel manga_carousel {
                       styles [
                         "rounded"
                       ]
                       hexpand: true;
-                      height-request: 300;
                     };
-                  }
+                  };
 
+                  [overlay]
                   Adw.CarouselIndicatorDots {
                     carousel: manga_carousel;
+                    valign: end;
                   }
                 };
               }

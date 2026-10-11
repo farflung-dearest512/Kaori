@@ -12,7 +12,8 @@ from .webtoon import WebtoonReader
 from .double import DoublePageReader
 
 LAST_PAGE = 10**6
-SETTINGS_SAVE_DELAY = 500  # ms
+SETTINGS_SAVE_DELAY = 500
+HEADER_HOVER_HEIGHT = 56
 
 ORIENTATIONS = {
     "vertical": Gtk.Orientation.VERTICAL,
@@ -41,6 +42,8 @@ class ReaderPage(Adw.NavigationPage):
     position = GObject.Property(type=int, default=0)
     direction = GObject.Property(type=Gtk.TextDirection, default=Gtk.TextDirection.LTR)
 
+    revealer = Gtk.Template.Child()
+    header = Gtk.Template.Child()
     stack = Gtk.Template.Child()
 
     READERS = [
@@ -56,7 +59,7 @@ class ReaderPage(Adw.NavigationPage):
 
         self.store = Gio.ListStore(item_type=models.Page)
         self.load_task = None
-        self.saved_pages = {}  # chapter id -> highest page (1-based) saved
+        self.saved_pages = {}
 
         sync = GObject.BindingFlags.SYNC_CREATE
         both_ways = sync | GObject.BindingFlags.BIDIRECTIONAL
@@ -93,21 +96,32 @@ class ReaderPage(Adw.NavigationPage):
             action_group.add_action(action)
         self.insert_action_group("reader", action_group)
 
-        # capture phase, otherwise the scrolled windows consume arrows and page keys first
         key_controller = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
         key_controller.connect("key-pressed", self.on_key_pressed)
         key_controller.connect("key-released", self.on_key_released)
         self.add_controller(key_controller)
 
-        # a release is never delivered if focus leaves while a key is held
         focus_controller = Gtk.EventControllerFocus()
         focus_controller.connect("leave", lambda controller: self.webtoon.stop_scrolling())
         self.add_controller(focus_controller)
 
-        # can-pop is off so the nav view's own back gestures never fire here
         back_click = Gtk.GestureClick(button=8)
         back_click.connect("pressed", lambda gesture, n_press, x, y: self.go_back())
         self.add_controller(back_click)
+
+        self.pointer_in_zone = True
+        self.root_handlers = []
+
+        motion_controller = Gtk.EventControllerMotion(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        motion_controller.connect("enter", self.on_pointer_motion)
+        motion_controller.connect("motion", self.on_pointer_motion)
+        self.add_controller(motion_controller)
+
+        self.header_focus = Gtk.EventControllerFocus()
+        self.header_focus.connect("notify::contains-focus", self.update_header)
+        self.header.add_controller(self.header_focus)
+
+        self.connect("notify::root", self.on_root_changed)
 
         self.applying_settings = False
         self.settings_loaded = False
@@ -121,9 +135,43 @@ class ReaderPage(Adw.NavigationPage):
 
         self.start_load(chapter_model, resume_position=self.initial_resume_position(chapter_model))
 
+    def on_root_changed(self, *args):
+        for obj, handler_id in self.root_handlers:
+            obj.disconnect(handler_id)
+        self.root_handlers = []
+
+        root = self.get_root()
+        if root is None:
+            return
+
+        split_view = root.overlay_split_view
+        self.root_handlers = [
+            (root, root.connect("notify::visible-dialog", self.update_header)),
+            (split_view, split_view.connect("notify::show-sidebar", self.update_header)),
+        ]
+        self.update_header()
+
+    def on_pointer_motion(self, controller, x, y):
+        inside = y <= HEADER_HOVER_HEIGHT
+        if inside != self.pointer_in_zone:
+            self.pointer_in_zone = inside
+            self.update_header()
+
+    def update_header(self, *args):
+        root = self.get_root()
+        if root is None:
+            return
+
+        keep_open = (
+            self.pointer_in_zone
+            or root.get_visible_dialog() is not None
+            or root.overlay_split_view.get_show_sidebar()
+            or (self.header_focus.props.contains_focus and root.get_focus_visible())
+        )
+        self.revealer.set_reveal_child(keep_open)
+
     @property
     def stored_chapter_id(self):
-        """The chapter `self.store` holds, read from its pages."""
         first = self.store.get_item(0)
         return first.chapter_id if first else None
 
@@ -148,8 +196,6 @@ class ReaderPage(Adw.NavigationPage):
         pages = await self.suwayomi.getChapterPages(chapter_model.id)
         self.store.splice(0, self.store.get_n_items(), pages)
 
-        # The webtoon reader can move chapter_model while we were fetching;
-        # don't yank the position around if it did.
         if self.chapter_model is None or self.chapter_model.id != chapter_model.id:
             return
 
@@ -172,8 +218,7 @@ class ReaderPage(Adw.NavigationPage):
     def on_unrealize(self, page):
         for task in (self.load_task, self.settings_task):
             if task is not None:
-                task.cancel()  # no-op if already finished
-        # Don't lose a settings change made just before leaving.
+                task.cancel()
         if self.save_settings_id:
             GLib.source_remove(self.save_settings_id)
             self.flush_settings()
@@ -195,7 +240,7 @@ class ReaderPage(Adw.NavigationPage):
         if chapter is None or chapter.id == self.stored_chapter_id:
             return
         if self.active_reader is self.webtoon or self.loading():
-            return  # the webtoon has its own store
+            return
         self.start_load(chapter, resume_position=self.position)
 
     def on_key_pressed(self, controller, keyval, keycode, state):
@@ -275,12 +320,12 @@ class ReaderPage(Adw.NavigationPage):
             self.webtoon.scroll_page(-1)
         elif direction := self.scroll_direction(keyval):
             self.webtoon.start_scrolling(direction)
-        return True  # swallow every other key so webtoon never page-turns
+        return True
 
     def on_position_notify(self, page, pspec):
         chapter = self.chapter_model
         if chapter is None or self.loading():
-            return  # position changes during a load are resume/restore, not reading
+            return
         saved = max(self.saved_pages.get(chapter.id, 0), chapter.last_page_read)
         if self.position + 1 > saved:
             self.save_progress()
@@ -288,7 +333,7 @@ class ReaderPage(Adw.NavigationPage):
     def save_progress(self):
         chapter = self.chapter_model
         total = chapter.page_count
-        if total <= 0:  # page count not loaded yet, don't mark the chapter read
+        if total <= 0:
             return
         page = self.position + 1
         seen = self.position + self.active_reader.step
@@ -296,7 +341,6 @@ class ReaderPage(Adw.NavigationPage):
         asyncio.create_task(
             self.suwayomi.updateChapter(
                 chapter_id=chapter.id,
-                # never flip an already read chapter back to unread when rereading
                 is_read=chapter.is_read or seen >= total,
                 last_page_read=page,
             )
@@ -334,8 +378,6 @@ class ReaderPage(Adw.NavigationPage):
         }
 
     def on_setting_changed(self, *args):
-        # Ignore changes until the saved settings are applied, otherwise the
-        # defaults would overwrite them.
         if self.applying_settings or not self.settings_loaded:
             return
         if self.save_settings_id:

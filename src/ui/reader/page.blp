@@ -6,12 +6,19 @@ template $KaghezReaderPage : Adw.NavigationPage {
 
   can-pop: false;
 
-  child: Adw.ToolbarView {
-    extend-content-to-top-edge: true;
+  child: Gtk.Overlay {
+    child: Adw.ViewStack stack {
+      enable-transitions: true;
+    };
 
-    [top]
-    Adw.BreakpointBin {
-      child: Adw.HeaderBar {
+    [overlay]
+    Revealer revealer {
+      valign: start;
+      transition-duration: 300;
+      transition-type: crossfade;
+      reveal-child: true;
+
+      Adw.HeaderBar header {
         styles [
           "reader-header",
           "reader-osd"
@@ -28,14 +35,12 @@ template $KaghezReaderPage : Adw.NavigationPage {
         [start]
         Gtk.Label {
           styles ["little-bold"]
-          label: bind template.chapter_model as <$KaghezChapter> .name;
+          label: bind template.manga_model as <$KaghezManga> .title;
           ellipsize: middle;
-          tooltip-text: bind template.chapter_model as <$KaghezChapter> .name;
         }
 
         title-widget: Adw.WindowTitle {
           title: bind template.chapter_model as <$KaghezChapter> .name;
-          tooltip-text: bind template.chapter_model as <$KaghezManga> .title;
         };
 
         [end]
@@ -54,11 +59,7 @@ template $KaghezReaderPage : Adw.NavigationPage {
             tooltip-text: _("Show Chapter Panel");
           }
         }
-      };
+      }
     }
-
-    content: Adw.ViewStack stack {
-      enable-transitions: true;
-    };
   };
 }

@@ -64,16 +64,33 @@
   </screenshots>
 
   <releases>
-    <release version="0.8.9" date="2026-10-01">
+    <release version="0.9.0" date="2026-10-11">
       <url type="details">
-        https://github.com/riyaniii/Kaori/releases/tag/v0.8.9
+        https://github.com/riyaniii/Kaori/releases/tag/v0.9.9
       </url>
       <description translate="no">
         <p>
-          Renamed app to Kaori
-          Added proper keyboard navigation for the readers
+          Added Gestures and Keyboard Shortcuts to the Shortcuts Dialog
+          Added extension/source support for languages other than english
+          Reader header now hides and reveals itself like a video player
+          Made some UI improvements like uniform margins around the pages,
+          which hopefully will make the app less OCD-inducing
+          Fixed a bug where the manga overview cover was wrongly sized
           Updated Suwayomi-Server
         </p>
+      </description>
+    </release>
+    <release version="0.9.0" date="2026-10-11">
+      <url type="details">https://github.com/riyaniii/Kaori/releases/tag/v0.9.0</url>
+      <description translate="no">
+        <ul>
+          <li>Added gestures and keyboard shortcuts to the shortcuts dialog.</li>
+          <li>Added extension and source support for languages other than English.</li>
+          <li>Updated the reader header to hide and reveal itself like a video player.</li>
+          <li>Improved UI margins around pages.</li>
+          <li>Fixed incorrect manga overview cover sizing.</li>
+          <li>Updated Suwayomi-Server.</li>
+        </ul>
       </description>
     </release>
     <release version="0.8.8" date="2026-09-23">
@@ -88,3 +105,4 @@
     </release>
   </releases>
 </component>
+

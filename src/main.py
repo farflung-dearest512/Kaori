@@ -1,7 +1,9 @@
 import asyncio
 import os
+import shutil
 import signal
 import sys
+import threading
 import traceback
 from gettext import gettext as _
 
@@ -10,6 +12,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.events import GLibEventLoopPolicy
+
 asyncio.set_event_loop_policy(GLibEventLoopPolicy())
 
 from gi.repository import Adw, Gio, GLib
@@ -20,16 +23,30 @@ from .widgets import KaghezWindow, build_shortcuts
 from .widgets.preferences import KaghezPreferences
 from .widgets.setup import SetupWindow
 
+APPLICATION_ID = 'com.rini.kaghez'
 JAR_NAME = 'Suwayomi-Server.jar'
 LOCAL_URL = 'http://localhost:4567'
-READY_TIMEOUT = 10
+
+READY_TIMEOUT = 60.0
 POLL_INTERVAL = 0.5
+SHUTDOWN_TIMEOUT = 5.0
+
+SERVER_JVM_ARGS = (
+    '-Dsuwayomi.tachidesk.config.server.systemTrayEnabled=false',
+    '-Dsuwayomi.tachidesk.config.server.initialOpenInBrowserEnabled=false',
+    '-Dsuwayomi.tachidesk.config.server.kcefEnabled=false',
+)
 
 
 class LocalServer:
-    def __init__(self):
+    def __init__(self) -> None:
         self.proc: Gio.Subprocess | None = None
         self.pump: asyncio.Task | None = None
+        self.exited = False
+
+    @property
+    def running(self) -> bool:
+        return self.proc is not None and not self.exited
 
     @staticmethod
     def jar_path() -> str | None:
@@ -38,60 +55,89 @@ class LocalServer:
         return path if os.path.isfile(path) else None
 
     def start(self) -> bool:
-        if self.proc:
+        if self.running:
             return True
+
         jar = self.jar_path()
         if not jar:
-            print('local Suwayomi server jar not found')
+            print('[server] bundled Suwayomi jar not found')
+            return False
+
+        java = shutil.which('java')
+        if not java:
+            print('[server] Java runtime not found in PATH')
             return False
 
         launcher = Gio.SubprocessLauncher.new(
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
         try:
-            self.proc = launcher.spawnv([
-                'java',
-                '-Dsuwayomi.tachidesk.config.server.systemTrayEnabled=false',
-                '-Dsuwayomi.tachidesk.config.server.initialOpenInBrowserEnabled=false',
-                '-Dsuwayomi.tachidesk.config.server.kcefEnabled=false',
-                '-jar', jar,
-            ])
+            self.proc = launcher.spawnv([java, *SERVER_JVM_ARGS, '-jar', jar])
         except GLib.Error as e:
-            print(f'failed to start local server: {e.message}')
+            print(f'[server] failed to start: {e.message}')
+            self.proc = None
             return False
 
-        self.pump = asyncio.create_task(self._pump_output())
+        self.exited = False
+        self.proc.wait_async(None, self._on_exit)
+        self.pump = asyncio.create_task(self._pump_output(self.proc))
         return True
 
-    def stop(self):
+    def stop(self) -> None:
         if self.pump:
             self.pump.cancel()
             self.pump = None
-        if self.proc:
-            if self.proc.get_identifier():
-                self.proc.send_signal(signal.SIGTERM)
-                try:
-                    self.proc.wait(None)
-                except GLib.Error:
-                    self.proc.force_exit()
-            self.proc = None
 
-    async def _pump_output(self):
-        stream = Gio.DataInputStream.new(self.proc.get_stdout_pipe())
+        proc, self.proc = self.proc, None
+        if proc is None or self.exited:
+            self.exited = False
+            return
+
+        proc.send_signal(signal.SIGTERM)
+        cancellable = Gio.Cancellable()
+        timer = threading.Timer(SHUTDOWN_TIMEOUT, cancellable.cancel)
+        timer.start()
         try:
-            while (line := await stream.read_line_async(GLib.PRIORITY_DEFAULT)[0]) is not None:
-                print(f'[suwayomi] {line.decode(errors="replace")}', flush=True)
+            proc.wait(cancellable)
+        except GLib.Error:
+            print('[server] did not exit in time, killing it')
+            proc.force_exit()
+        finally:
+            timer.cancel()
+        self.exited = False
+
+    def _on_exit(self, proc: Gio.Subprocess, result: Gio.AsyncResult) -> None:
+        try:
+            proc.wait_finish(result)
+            if proc.get_if_exited():
+                print(f'[server] exited with status {proc.get_exit_status()}')
+            elif proc.get_if_signaled():
+                print(f'[server] terminated by signal {proc.get_term_sig()}')
         except GLib.Error as e:
-            print(f'[suwayomi] {e.message}', flush=True)
+            print(f'[server] wait failed: {e.message}')
+        if proc is self.proc:
+            self.exited = True
+
+    @staticmethod
+    async def _pump_output(proc: Gio.Subprocess) -> None:
+        stream = Gio.DataInputStream.new(proc.get_stdout_pipe())
+        try:
+            while True:
+                line, _length = await stream.read_line_async(GLib.PRIORITY_DEFAULT)
+                if line is None:
+                    break
+                print(f'[suwayomi] {line.decode(errors="replace")}')
+        except GLib.Error as e:
+            print(f'[suwayomi] {e.message}')
 
 
 class KaghezApplication(Adw.Application):
 
-    def __init__(self, version):
-        super().__init__(application_id='com.rini.kaghez',
+    def __init__(self, version: str) -> None:
+        super().__init__(application_id=APPLICATION_ID,
                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
                          resource_base_path='/com/rini/kaghez')
         self.version = version
-        self.settings = Gio.Settings(schema_id='com.rini.kaghez')
+        self.settings = Gio.Settings(schema_id=APPLICATION_ID)
         self.suwayomi = Suwayomi()
         self.server = LocalServer()
 
@@ -102,7 +148,8 @@ class KaghezApplication(Adw.Application):
         self.create_action('about', self.on_about_action)
         self.create_action('change_instance', self.on_change_instance_action)
 
-    def do_activate(self):
+
+    def do_activate(self) -> None:
         if win := self.props.active_window:
             win.present()
             return
@@ -117,17 +164,17 @@ class KaghezApplication(Adw.Application):
             self.launch_or_setup(mode, self.settings.get_string('suwayomi-url')))
         task.add_done_callback(self.log_task_error)
 
-    def do_shutdown(self):
+    def do_shutdown(self) -> None:
         self.server.stop()
-        self.suwayomi.cache.close()
+        self.suwayomi.shutdown()
         Adw.Application.do_shutdown(self)
 
     @staticmethod
-    def log_task_error(task: asyncio.Task):
+    def log_task_error(task: asyncio.Task) -> None:
         if not task.cancelled() and (exc := task.exception()):
-            traceback.print_exception(exc)
+            traceback.print(_exception(exc))
 
-    async def launch_or_setup(self, mode: str, url: str):
+    async def launch_or_setup(self, mode: str, url: str) -> None:
         try:
             if not await self.launch(mode, url):
                 self.show_setup_window(
@@ -136,6 +183,7 @@ class KaghezApplication(Adw.Application):
             self.release()
 
     async def launch(self, mode: str, url: str) -> bool:
+        """Connect to a local or remote server and open the main window."""
         local = mode == 'local'
         if local and not self.server.start():
             return False
@@ -155,19 +203,28 @@ class KaghezApplication(Adw.Application):
         return True
 
     async def wait_for_server(self) -> bool:
+        """Poll until the server answers, it dies, or the timeout expires.
+
+        The GraphQL session is reused across polls: connection errors surface
+        per request, so the same session recovers as soon as the server is up.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + READY_TIMEOUT
         while loop.time() < deadline:
-            self.suwayomi.session = None  # force a fresh handshake
+            if self.server.proc is not None and self.server.exited:
+                print('[server] process exited before becoming ready')
+                return False
             if await self.suwayomi.getServerSettings():
                 return True
             await asyncio.sleep(POLL_INTERVAL)
+        print(f'[server] not ready after {READY_TIMEOUT:.0f}s')
         return False
 
-    def show_setup_window(self, error: str | None = None):
+
+    def show_setup_window(self, error: str | None = None) -> None:
         SetupWindow(application=self, error=error).present()
 
-    def on_change_instance_action(self, *args):
+    def on_change_instance_action(self, *args) -> None:
         self.server.stop()
         if win := self.props.active_window:
             for dialog in list(win.get_dialogs()):
@@ -175,13 +232,12 @@ class KaghezApplication(Adw.Application):
             win.close()
         self.show_setup_window()
 
-    def on_about_action(self, *args):
+    def on_about_action(self, *args) -> None:
         Adw.AboutDialog(
             application_name=NAME,
-            application_icon='com.rini.kaghez',
+            application_icon=APPLICATION_ID,
             developer_name='Riyan Parvez',
             version=self.version,
-            # Translators: Replace "translator-credits" with your name/username.
             translator_credits=_('translator-credits'),
             developers=['Riyan Parvez (rini)'],
             designers=['Riyan Parvez (rini)'],
@@ -191,13 +247,13 @@ class KaghezApplication(Adw.Application):
             website='https://github.com/riyaniii/Kaghez',
         ).present(self.props.active_window)
 
-    def on_preferences_action(self, *args):
+    def on_preferences_action(self, *args) -> None:
         KaghezPreferences().present(self.props.active_window)
 
-    def on_shortcuts_action(self, *args):
+    def on_shortcuts_action(self, *args) -> None:
         build_shortcuts().present(self.props.active_window)
 
-    def create_action(self, name, callback, shortcuts=None, parameter_type=None):
+    def create_action(self, name, callback, shortcuts=None, parameter_type=None) -> None:
         action = Gio.SimpleAction.new(name, parameter_type)
         action.connect('activate', callback)
         self.add_action(action)
@@ -205,6 +261,7 @@ class KaghezApplication(Adw.Application):
             self.set_accels_for_action(f'app.{name}', shortcuts)
 
 
-def main(version):
+def main(version: str) -> int:
     set_version(version)
     return KaghezApplication(version).run(sys.argv)
+

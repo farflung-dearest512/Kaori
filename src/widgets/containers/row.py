@@ -74,3 +74,4 @@ class MangaRow(Gtk.Box):
 
     def set_items(self, items: list):
         self.store.splice(0, self.store.get_n_items(), items)
+

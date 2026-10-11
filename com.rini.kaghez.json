@@ -1,7 +1,7 @@
 {
     "id": "com.rini.kaghez",
     "runtime": "org.gnome.Platform",
-    "runtime-version": "50",
+    "runtime-version": "master",
     "sdk": "org.gnome.Sdk",
     "sdk-extensions": [
         "org.freedesktop.Sdk.Extension.rust-stable",
@@ -39,6 +39,7 @@
     "modules": [
         "python3-gql.json",
         "python3-diskcache.json",
+        "python3-babel.json",
         {
             "name": "glycin-loaders",
             "buildsystem": "meson",
