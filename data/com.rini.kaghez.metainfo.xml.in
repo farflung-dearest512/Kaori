@@ -65,22 +65,6 @@
 
   <releases>
     <release version="0.9.0" date="2026-10-11">
-      <url type="details">
-        https://github.com/riyaniii/Kaori/releases/tag/v0.9.9
-      </url>
-      <description translate="no">
-        <p>
-          Added Gestures and Keyboard Shortcuts to the Shortcuts Dialog
-          Added extension/source support for languages other than english
-          Reader header now hides and reveals itself like a video player
-          Made some UI improvements like uniform margins around the pages,
-          which hopefully will make the app less OCD-inducing
-          Fixed a bug where the manga overview cover was wrongly sized
-          Updated Suwayomi-Server
-        </p>
-      </description>
-    </release>
-    <release version="0.9.0" date="2026-10-11">
       <url type="details">https://github.com/riyaniii/Kaori/releases/tag/v0.9.0</url>
       <description translate="no">
         <ul>
