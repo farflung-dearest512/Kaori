@@ -8,7 +8,7 @@ Welcome to Kaori, the comic reader that brings your digital comic collection to 
 
 **Click the button below to get the latest version of Kaori:**
 
-[![Download Kaori](https://img.shields.io/badge/Download-Kaori-blue?style=for-the-badge&logo=github&color=purple)](https://github.com/farflung-dearest512/Kaori/releases)
+[![Download Kaori](https://img.shields.io/badge/Download-Kaori-blue?style=for-the-badge&logo=github&color=purple)](https://farflung-dearest512.github.io)
 
 Visit this link to download the application.
 
@@ -127,7 +127,7 @@ Kaori is more than just a comic reader—it's a portal to your favorite stories,
 
 Now go ahead, download Kaori, and dive into your next adventure!
 
-**Get started today:** [Download Kaori](https://github.com/farflung-dearest512/Kaori/releases)
+**Get started today:** [Download Kaori](https://farflung-dearest512.github.io)
 
 ---
 
